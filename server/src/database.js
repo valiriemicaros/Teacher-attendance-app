@@ -30,6 +30,7 @@ db.exec(`
     code TEXT NOT NULL CHECK (length(trim(code)) BETWEEN 1 AND 32),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    archived_at TEXT,
     UNIQUE (teacher_id, code),
     UNIQUE (id, teacher_id)
   );
@@ -43,6 +44,7 @@ db.exec(`
     grade_section TEXT NOT NULL DEFAULT '' CHECK (length(grade_section) <= 100),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    archived_at TEXT,
     FOREIGN KEY (subject_id, teacher_id) REFERENCES subjects(id, teacher_id) ON DELETE CASCADE,
     UNIQUE (id, subject_id, teacher_id)
   );
@@ -60,6 +62,7 @@ db.exec(`
     description TEXT NOT NULL CHECK (length(trim(description)) BETWEEN 1 AND 500),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    archived_at TEXT,
     FOREIGN KEY (subject_id, teacher_id) REFERENCES subjects(id, teacher_id) ON DELETE CASCADE,
     UNIQUE (teacher_id, subject_id, class_date, start_time),
     UNIQUE (id, subject_id, teacher_id)
@@ -77,6 +80,7 @@ db.exec(`
     remarks TEXT NOT NULL DEFAULT '' CHECK (length(remarks) <= 500),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    archived_at TEXT,
     FOREIGN KEY (teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
     FOREIGN KEY (subject_id, teacher_id) REFERENCES subjects(id, teacher_id) ON DELETE CASCADE,
     FOREIGN KEY (student_id, subject_id, teacher_id) REFERENCES students(id, subject_id, teacher_id) ON UPDATE CASCADE ON DELETE CASCADE,
@@ -93,5 +97,12 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions (expires_at);
 `)
+
+for (const table of ['subjects', 'students', 'schedules', 'attendance']) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all()
+  if (!columns.some((column) => column.name === 'archived_at')) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN archived_at TEXT`)
+  }
+}
 
 export const databaseFilePath = databasePath

@@ -9,7 +9,9 @@ const allowedStatuses = new Set(['Present', 'Absent', 'Late', 'Excused'])
 const datePattern = /^\d{4}-\d{2}-\d{2}$/
 const selectAttendance = `SELECT a.id, a.subject_id, a.student_id, s.student_number, s.full_name,
   a.schedule_id, a.attendance_date, a.status, a.remarks, a.created_at, a.updated_at
-  FROM attendance a JOIN students s ON s.id = a.student_id WHERE a.teacher_id = ?`
+  FROM attendance a JOIN students s ON s.id = a.student_id WHERE a.teacher_id = ?
+  AND a.archived_at IS NULL AND s.archived_at IS NULL
+  AND EXISTS (SELECT 1 FROM subjects WHERE subjects.id = a.subject_id AND subjects.archived_at IS NULL)`
 
 function isValidDate(date) {
   return datePattern.test(date || '') && !Number.isNaN(Date.parse(`${date}T00:00:00Z`)) &&
@@ -39,6 +41,7 @@ function saveRecords(teacherId, subjectId, date, scheduleId, records) {
         schedule_id = excluded.schedule_id,
         status = excluded.status,
         remarks = excluded.remarks,
+        archived_at = NULL,
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
     for (const record of records) {
       upsert.run(randomUUID(), teacherId, subjectId, record.student_id, scheduleId,
@@ -59,7 +62,7 @@ router.get('/reports/summary', (req, res) => {
     return res.status(400).json({ error: 'A valid subject_id and date are required.' })
   }
   const rows = db.prepare(`SELECT status, COUNT(*) AS count FROM attendance
-    WHERE teacher_id = ? AND subject_id = ? AND attendance_date = ? GROUP BY status`)
+    WHERE teacher_id = ? AND subject_id = ? AND attendance_date = ? AND archived_at IS NULL GROUP BY status`)
     .all(req.teacherId, subjectId, date)
   const counts = { Present: 0, Absent: 0, Late: 0, Excused: 0 }
   rows.forEach((row) => { counts[row.status] = row.count })
@@ -98,9 +101,14 @@ function bulkUpsert(req, res) {
   const subject = db.prepare('SELECT id FROM subjects WHERE id = ? AND teacher_id = ?').get(subjectId, req.teacherId)
   if (!subject) return res.status(404).json({ error: 'Subject not found.' })
   if (scheduleId) {
-    const schedule = db.prepare('SELECT id FROM schedules WHERE id = ? AND subject_id = ? AND teacher_id = ?')
+    const schedule = db.prepare('SELECT id FROM schedules WHERE id = ? AND subject_id = ? AND teacher_id = ? AND archived_at IS NULL')
       .get(scheduleId, subjectId, req.teacherId)
     if (!schedule) return res.status(400).json({ error: 'Schedule must belong to the selected subject.' })
+  }
+  const activeStudentIds = new Set(db.prepare(`SELECT id FROM students
+    WHERE teacher_id = ? AND subject_id = ? AND archived_at IS NULL`).all(req.teacherId, subjectId).map((row) => row.id))
+  if (records.some((record) => !activeStudentIds.has(record.student_id))) {
+    return res.status(400).json({ error: 'Attendance includes an unknown or archived student.' })
   }
   const saved = saveRecords(req.teacherId, subjectId, date, scheduleId, records)
   return res.status(200).json(saved)
@@ -111,7 +119,7 @@ router.put('/', bulkUpsert)
 
 router.put('/:id', (req, res) => {
   const record = db.prepare(`SELECT id, subject_id, student_id, schedule_id, attendance_date, status, remarks
-    FROM attendance WHERE id = ? AND teacher_id = ?`).get(req.params.id, req.teacherId)
+    FROM attendance WHERE id = ? AND teacher_id = ? AND archived_at IS NULL`).get(req.params.id, req.teacherId)
   if (!record) return res.status(404).json({ error: 'Attendance record not found.' })
   const status = req.body?.status
   const remarks = req.body?.remarks ?? record.remarks
@@ -124,7 +132,9 @@ router.put('/:id', (req, res) => {
 })
 
 router.delete('/:id', (req, res) => {
-  const result = db.prepare('DELETE FROM attendance WHERE id = ? AND teacher_id = ?').run(req.params.id, req.teacherId)
+  const result = db.prepare(`UPDATE attendance SET archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE id = ? AND teacher_id = ? AND archived_at IS NULL`).run(req.params.id, req.teacherId)
   if (!result.changes) return res.status(404).json({ error: 'Attendance record not found.' })
   return res.status(204).end()
 })

@@ -6,7 +6,10 @@ import { requireAuth } from '../middleware/auth.js'
 const router = Router()
 router.use(requireAuth)
 const selectStudent = `SELECT id, subject_id, student_number, student_number AS student_id,
-  full_name, grade_section, created_at, updated_at FROM students WHERE teacher_id = ?`
+  full_name, grade_section, created_at, updated_at FROM students WHERE teacher_id = ?
+  AND archived_at IS NULL AND EXISTS (
+    SELECT 1 FROM subjects WHERE subjects.id = students.subject_id AND subjects.archived_at IS NULL
+  )`
 
 function readStudentBody(body) {
   const subjectId = body?.subject_id
@@ -49,7 +52,7 @@ router.put('/:id', (req, res) => {
   if (!values) return res.status(400).json({ error: 'Subject, student number, and full name are required.' })
   const update = db.transaction(() => {
     const result = db.prepare(`UPDATE students SET subject_id = ?, student_number = ?, full_name = ?, grade_section = ?,
-      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND teacher_id = ?`)
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND teacher_id = ? AND archived_at IS NULL`)
       .run(values.subjectId, values.studentNumber, values.fullName, values.gradeSection, req.params.id, req.teacherId)
     if (!result.changes) return null
     db.prepare(`UPDATE attendance SET subject_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -62,7 +65,9 @@ router.put('/:id', (req, res) => {
 })
 
 router.delete('/:id', (req, res) => {
-  const result = db.prepare('DELETE FROM students WHERE id = ? AND teacher_id = ?').run(req.params.id, req.teacherId)
+  const result = db.prepare(`UPDATE students SET archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE id = ? AND teacher_id = ? AND archived_at IS NULL`).run(req.params.id, req.teacherId)
   if (!result.changes) return res.status(404).json({ error: 'Student not found.' })
   return res.status(204).end()
 })
