@@ -1,11 +1,9 @@
 import { useEffect, useState } from 'react'
 import { supabase } from './lib/supabaseClient.js'
 import {
-  apiRequest,
   normalizeSchedule,
   normalizeStudent,
   normalizeSubject,
-  queryString,
 } from './api.js'
 import './App.css'
 
