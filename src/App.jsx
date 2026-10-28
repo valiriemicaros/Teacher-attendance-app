@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { supabase } from './lib/supabaseClient.js'
 import {
   apiRequest,
   normalizeSchedule,
@@ -59,63 +60,123 @@ function App() {
   const [scheduleSaving, setScheduleSaving] = useState(false)
   const [savedSession, setSavedSession] = useState(null)
 
-  useEffect(() => {
-    let active = true
-    apiRequest('/auth/me')
-      .then(({ teacher }) => {
-        if (!active) return
-        setUser(teacher)
-      })
-      .catch((error) => {
-        if (active) setAuthError(error.message)
-      })
-      .finally(() => {
-        if (active) setAuthLoading(false)
-      })
-    return () => { active = false }
-  }, [])
+ useEffect(() => {
+  let active = true
 
-  useEffect(() => {
-    if (!user?.id) return undefined
-    let active = true
-    Promise.all([
-      apiRequest('/subjects'),
-      apiRequest('/students'),
-      apiRequest('/schedules'),
-    ])
-      .then(([subjects, students, schedules]) => {
-        if (!active) return
-        const normalizedSubjects = subjects.map(normalizeSubject)
-        const normalizedStudents = students.map(normalizeStudent)
-        const normalizedSchedules = schedules.map(normalizeSchedule)
-        setData((current) => ({ ...current, subjects: normalizedSubjects, students: normalizedStudents, schedules: normalizedSchedules }))
-        setSchedule((current) => {
-          if (current.subjectId && normalizedSubjects.some((subject) => subject.id === current.subjectId)) return current
-          const subjectId = normalizedSubjects[0]?.id || ''
-          const saved = normalizedSchedules.find((item) => item.subjectId === subjectId && item.date === current.date)
-          return {
-            ...current,
-            subjectId,
-            room: saved?.room || '',
-            time: saved?.time || '',
-            description: saved?.description || '',
-          }
+  async function checkSession() {
+    try {
+      const { data, error } = await supabase.auth.getSession()
+
+      if (!active) return
+      if (error) throw error
+
+      const currentUser = data.session?.user
+
+      if (currentUser) {
+        setUser({
+          id: currentUser.id,
+          email: currentUser.email,
+          full_name:
+            currentUser.user_metadata?.full_name ||
+            currentUser.email ||
+            'Teacher',
         })
-        setSelectedScheduleId((currentId) => normalizedSchedules.some((item) => item.id === currentId)
-          ? currentId
-          : normalizedSchedules.find((item) => item.subjectId === (normalizedSubjects[0]?.id || '') && item.date === localDate())?.id || '')
-        setDataError('')
-      })
-      .catch((error) => {
-        if (active) setDataError(error.message)
-      })
-    return () => { active = false }
-  }, [user?.id])
+      } else {
+        setUser(null)
+      }
+    } catch (error) {
+      if (active) {
+        setUser(null)
+        setAuthError(error.message || 'Could not check login session.')
+      }
+    } finally {
+      if (active) setAuthLoading(false)
+    }
+  }
 
-  useEffect(() => {
-    const clock = window.setInterval(() => setNow(new Date()), 60_000)
-    return () => window.clearInterval(clock)
-  }, [])
+  checkSession()
+
+  const {
+    data: { subscription },
+  } = supabase.auth.onAuthStateChange((_event, session) => {
+    if (!active) return
+
+    const currentUser = session?.user
+
+    setUser(
+      currentUser
+        ? {
+            id: currentUser.id,
+            email: currentUser.email,
+            full_name:
+              currentUser.user_metadata?.full_name ||
+              currentUser.email ||
+              'Teacher',
+          }
+        : null
+    )
+
+    setAuthLoading(false)
+  })
+
+  return () => {
+    active = false
+    subscription.unsubscribe()
+  }
+}, [])
+
+useEffect(() => {
+  let active = true
+
+  async function loadAppData() {
+    if (!user?.id) return
+
+    try {
+      setDataError('')
+
+      const [subjectsResult, studentsResult, schedulesResult] =
+        await Promise.all([
+          supabase
+            .from('subjects')
+            .select('*')
+            .eq('teacher_id', user.id),
+
+          supabase
+            .from('students')
+            .select('*')
+            .eq('teacher_id', user.id),
+
+          supabase
+            .from('schedules')
+            .select('*')
+            .eq('teacher_id', user.id),
+        ])
+
+      if (subjectsResult.error) throw subjectsResult.error
+      if (studentsResult.error) throw studentsResult.error
+      if (schedulesResult.error) throw schedulesResult.error
+
+      if (!active) return
+
+      setData((current) => ({
+        ...current,
+        subjects: (subjectsResult.data || []).map(normalizeSubject),
+        students: (studentsResult.data || []).map(normalizeStudent),
+        schedules: (schedulesResult.data || []).map(normalizeSchedule),
+      }))
+    } catch (error) {
+      if (active) setDataError(error.message)
+    }
+  }
+
+  loadAppData()
+
+  return () => {
+    active = false
+  }
+}, [user?.id])
+
+
 
   const dayName = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(now).toUpperCase()
   const fullDate = new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(now).toUpperCase()
@@ -131,154 +192,359 @@ function App() {
     ? data.students
     : data.students.filter((student) => student.subjectId === studentFilter)
 
-  useEffect(() => {
-    if (!user?.id || !activeSubjectId || !schedule.date) return undefined
-    let active = true
-    apiRequest(`/attendance${queryString({ subject_id: activeSubjectId, date: schedule.date })}`)
-      .then((records) => {
-        if (!active) return
-        const statusesByStudent = Object.fromEntries(records.map((record) => [record.student_id, record.status]))
-        setData((current) => ({
-          ...current,
-          attendance: {
-            ...current.attendance,
-            [attendanceKey]: { statuses: statusesByStudent },
-          },
-        }))
-      })
-      .catch((error) => {
-        if (active) setDataError(error.message)
-      })
-    return () => { active = false }
-  }, [user?.id, activeSubjectId, schedule.date, attendanceKey])
+  
+useEffect(() => {
+  let active = true
 
-  async function handleAuthSubmit(event) {
-    event.preventDefault()
+  async function loadAttendance() {
+    if (!user?.id || !activeSubjectId || !schedule?.date) return
+
+    try {
+      setDataError('')
+
+      const { data: records, error } = await supabase
+        .from('attendance')
+        .select('student_id, status')
+        .eq('teacher_id', user.id)
+        .eq('subject_id', activeSubjectId)
+        .eq('attendance_date', schedule.date)
+
+      if (error) throw error
+      if (!active) return
+
+      const statusesByStudent = Object.fromEntries(
+        records.map((record) => [
+          record.student_id,
+          record.status,
+        ])
+      )
+
+      setData((current) => ({
+        ...current,
+        attendance: {
+          ...current.attendance,
+          [attendanceKey]: { statuses: statusesByStudent },
+        },
+      }))
+    } catch (error) {
+      if (active) setDataError(error.message)
+    }
+  }
+
+  loadAttendance()
+
+  return () => {
+    active = false
+  }
+}, [user?.id, activeSubjectId, schedule?.date, attendanceKey])
+
+
+  
+async function handleAuthSubmit(event) {
+  event.preventDefault()
+  setAuthError('')
+  setAuthMessage('')
+
+  try {
+    const email = authForm.email.trim().toLowerCase()
+
+    if (authMode === 'create') {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password: authForm.password,
+        options: {
+          data: {
+            full_name: authForm.name.trim(),
+          },
+        },
+      })
+
+      if (error) throw error
+
+      if (!data.session) {
+        setAuthMessage(
+          'Account created! Please check your email to confirm your account before logging in.'
+        )
+        setAuthMode('login')
+        setAuthForm({
+          name: '',
+          email,
+          password: '',
+        })
+        return
+      }
+
+      setAuthForm({ name: '', email: '', password: '' })
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password: authForm.password,
+      })
+
+      if (error) throw error
+
+      setAuthForm({ name: '', email: '', password: '' })
+    }
+
+    setData(emptyData())
+    setDataError('')
+  } catch (error) {
+    setAuthError(
+      error.message || 'Authentication failed. Please try again.'
+    )
+  }
+}
+
+
+ 
+async function logout() {
+  try {
+    const { error } = await supabase.auth.signOut()
+
+    if (error) throw error
+
+    setUser(null)
+    setData(emptyData())
+    setSavedSession(null)
+    setPage('subjects')
+    setAuthForm({ name: '', email: '', password: '' })
     setAuthError('')
     setAuthMessage('')
-    try {
-      const email = authForm.email.trim().toLowerCase()
-      const result = await apiRequest(authMode === 'create' ? '/auth/register' : '/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({
-          full_name: authForm.name.trim(),
-          email,
-          password: authForm.password,
-        }),
-      })
-      setData(emptyData())
-      setUser(result.teacher)
-      setAuthForm({ name: '', email: '', password: '' })
-    } catch (error) {
-      setAuthError(error.message || 'Authentication failed. Please try again.')
-    }
-  }
-
-  async function logout() {
-    try {
-      await apiRequest('/auth/logout', { method: 'POST' })
-      setUser(null)
-      setData(emptyData())
-      setSavedSession(null)
-      setPage('subjects')
-      setAuthForm({ name: '', email: '', password: '' })
-    } catch (error) {
-      setDataError(error.message)
-    }
-  }
-
-  async function saveSubject(event) {
-    event.preventDefault()
     setDataError('')
-    try {
-      const path = subjectEditingId ? `/subjects/${subjectEditingId}` : '/subjects'
-      const saved = normalizeSubject(await apiRequest(path, {
-        method: subjectEditingId ? 'PUT' : 'POST',
-        body: JSON.stringify({ name: subjectForm.name, code: subjectForm.code }),
-      }))
-      setData((current) => ({
-        ...current,
-        subjects: subjectEditingId
-          ? current.subjects.map((subject) => subject.id === saved.id ? saved : subject)
-          : [...current.subjects, saved],
-      }))
-      if (!activeSubjectId) setSchedule((current) => ({ ...current, subjectId: saved.id }))
-      setStudentForm((current) => ({ ...current, subjectId: current.subjectId || saved.id }))
-      setSubjectForm({ name: '', code: '' })
-      setSubjectEditingId(null)
-      setSubjectFormOpen(false)
-    } catch (error) {
-      setDataError(error.message)
+  } catch (error) {
+    setDataError(error.message || 'Could not log out. Please try again.')
+  }
+}
+
+
+  
+async function saveSubject(event) {
+  event.preventDefault()
+  setDataError('')
+
+  try {
+    const subjectData = {
+      name: subjectForm.name.trim(),
+      code: subjectForm.code.trim(),
     }
+
+    let result
+
+    if (subjectEditingId) {
+      const { data, error } = await supabase
+        .from('subjects')
+        .update(subjectData)
+        .eq('id', subjectEditingId)
+        .eq('teacher_id', user.id)
+        .select()
+        .single()
+
+      if (error) throw error
+      result = data
+    } else {
+      const { data, error } = await supabase
+        .from('subjects')
+        .insert({
+          ...subjectData,
+          teacher_id: user.id,
+        })
+        .select()
+        .single()
+
+      if (error) throw error
+      result = data
+    }
+
+    const saved = normalizeSubject(result)
+
+    setData((current) => ({
+      ...current,
+      subjects: subjectEditingId
+        ? current.subjects.map((subject) =>
+            subject.id === saved.id ? saved : subject
+          )
+        : [...current.subjects, saved],
+    }))
+
+    if (!activeSubjectId) {
+      setSchedule((current) => ({
+        ...current,
+        subjectId: saved.id,
+      }))
+    }
+
+    setStudentForm((current) => ({
+      ...current,
+      subjectId: current.subjectId || saved.id,
+    }))
+
+    setSubjectForm({ name: '', code: '' })
+    setSubjectEditingId(null)
+    setSubjectFormOpen(false)
+  } catch (error) {
+    setDataError(error.message)
+  }
+}
+
+
+ 
+async function deleteSubject(subjectId) {
+  if (
+    !window.confirm(
+      'Delete this subject and its schedules, students, and attendance?'
+    )
+  ) {
+    return
   }
 
-  async function deleteSubject(subjectId) {
-    if (!window.confirm('Delete this subject and its schedules, students, and attendance?')) return
-    try {
-      await apiRequest(`/subjects/${subjectId}`, { method: 'DELETE' })
-      const subjects = data.subjects.filter((subject) => subject.id !== subjectId)
-      setData((current) => ({
+  try {
+    const { error } = await supabase
+      .from('subjects')
+      .delete()
+      .eq('id', subjectId)
+      .eq('teacher_id', user.id)
+
+    if (error) throw error
+
+    const subjects = data.subjects.filter(
+      (subject) => subject.id !== subjectId
+    )
+
+    setData((current) => ({
+      ...current,
+      subjects,
+      students: current.students.filter(
+        (student) => student.subjectId !== subjectId
+      ),
+      schedules: current.schedules.filter(
+        (item) => item.subjectId !== subjectId
+      ),
+      attendance: Object.fromEntries(
+        Object.entries(current.attendance).filter(
+          ([key]) => !key.startsWith(`${subjectId}:`)
+        )
+      ),
+    }))
+
+    if (activeSubjectId === subjectId) {
+      setSchedule((current) => ({
         ...current,
-        subjects,
-        students: current.students.filter((student) => student.subjectId !== subjectId),
-        schedules: current.schedules.filter((item) => item.subjectId !== subjectId),
-        attendance: Object.fromEntries(Object.entries(current.attendance).filter(([key]) => !key.startsWith(`${subjectId}:`))),
+        subjectId: subjects[0]?.id || '',
       }))
-      if (activeSubjectId === subjectId) setSchedule((current) => ({ ...current, subjectId: subjects[0]?.id || '' }))
-    } catch (error) {
-      setDataError(error.message)
     }
+  } catch (error) {
+    setDataError(error.message)
+  }
+}
+
+
+  
+async function saveStudent(event) {
+  event.preventDefault()
+  setStudentError('')
+  setDataError('')
+
+  try {
+    const studentData = {
+      subject_id: studentForm.subjectId,
+      student_number: studentForm.studentId.trim(),
+      full_name: studentForm.name.trim(),
+      grade_section: studentForm.gradeSection.trim(),
+    }
+
+    let result
+
+    if (studentEditingId) {
+      const { data, error } = await supabase
+        .from('students')
+        .update(studentData)
+        .eq('id', studentEditingId)
+        .eq('teacher_id', user.id)
+        .select()
+        .single()
+
+      if (error) throw error
+      result = data
+    } else {
+      const { data, error } = await supabase
+        .from('students')
+        .insert({
+          ...studentData,
+          teacher_id: user.id,
+        })
+        .select()
+        .single()
+
+      if (error) throw error
+      result = data
+    }
+
+    const saved = normalizeStudent(result)
+
+    setData((current) => ({
+      ...current,
+      students: studentEditingId
+        ? current.students.map((student) =>
+            student.id === saved.id ? saved : student
+          )
+        : [...current.students, saved],
+    }))
+
+    setStudentForm({
+      name: '',
+      studentId: '',
+      subjectId: activeSubjectId || data.subjects[0]?.id || '',
+      gradeSection: '',
+    })
+
+    setStudentEditingId(null)
+    setStudentFormOpen(false)
+  } catch (error) {
+    setStudentError(error.message)
+  }
+}
+
+
+  
+async function deleteStudent(studentId) {
+  if (
+    !window.confirm(
+      'Delete this student and their attendance records?'
+    )
+  ) {
+    return
   }
 
-  async function saveStudent(event) {
-    event.preventDefault()
-    setStudentError('')
-    setDataError('')
-    try {
-      const path = studentEditingId ? `/students/${studentEditingId}` : '/students'
-      const saved = normalizeStudent(await apiRequest(path, {
-        method: studentEditingId ? 'PUT' : 'POST',
-        body: JSON.stringify({
-          subject_id: studentForm.subjectId,
-          student_number: studentForm.studentId,
-          full_name: studentForm.name,
-          grade_section: studentForm.gradeSection,
-        }),
-      }))
-      setData((current) => ({
-        ...current,
-        students: studentEditingId
-          ? current.students.map((student) => student.id === saved.id ? saved : student)
-          : [...current.students, saved],
-      }))
-      setStudentForm({ name: '', studentId: '', subjectId: activeSubjectId || data.subjects[0]?.id || '', gradeSection: '' })
-      setStudentEditingId(null)
-      setStudentFormOpen(false)
-    } catch (error) {
-      setStudentError(error.message)
-    }
-  }
+  try {
+    const { error } = await supabase
+      .from('students')
+      .delete()
+      .eq('id', studentId)
+      .eq('teacher_id', user.id)
 
-  async function deleteStudent(studentId) {
-    if (!window.confirm('Delete this student and their attendance records?')) return
-    try {
-      await apiRequest(`/students/${studentId}`, { method: 'DELETE' })
-      setData((current) => {
-        const attendance = Object.fromEntries(Object.entries(current.attendance).map(([key, record]) => {
+    if (error) throw error
+
+    setData((current) => {
+      const attendance = Object.fromEntries(
+        Object.entries(current.attendance).map(([key, record]) => {
           const statuses = { ...record.statuses }
           delete statuses[studentId]
           return [key, { ...record, statuses }]
-        }))
-        return {
-          ...current,
-          students: current.students.filter((student) => student.id !== studentId),
-          attendance,
-        }
-      })
-    } catch (error) {
-      setDataError(error.message)
-    }
+        })
+      )
+
+      return {
+        ...current,
+        students: current.students.filter(
+          (student) => student.id !== studentId
+        ),
+        attendance,
+      }
+    })
+  } catch (error) {
+    setDataError(error.message)
   }
+}
 
   function updateStatus(studentId, status) {
     setData((current) => {
@@ -305,36 +571,69 @@ function App() {
       description: saved?.description || '',
     })
   }
-
   function startNewSchedule() {
     setSelectedScheduleId('')
     setSchedule((current) => ({ ...current, room: '', time: '', description: '' }))
   }
 
-  async function persistSchedule() {
-    const scheduleId = selectedScheduleId || selectedSchedule?.id
-    const saved = normalizeSchedule(await apiRequest(
-      scheduleId ? `/schedules/${scheduleId}` : '/schedules',
-      {
-        method: scheduleId ? 'PUT' : 'POST',
-        body: JSON.stringify({
-          subject_id: activeSubjectId,
-          class_date: schedule.date,
-          room: schedule.room,
-          start_time: schedule.time,
-          description: schedule.description,
-        }),
-      },
-    ))
-    setData((current) => ({
-      ...current,
-      schedules: scheduleId
-        ? current.schedules.map((item) => item.id === saved.id ? saved : item)
-        : [...current.schedules, saved],
-    }))
-    setSelectedScheduleId(saved.id)
-    return saved
+  
+async function persistSchedule() {
+  const scheduleId = selectedScheduleId || selectedSchedule?.id
+
+  const scheduleData = {
+    teacher_id: user.id,
+    subject_id: activeSubjectId,
+    class_date: schedule.date,
+    room: schedule.room,
+    start_time: schedule.time,
+    description: schedule.description,
   }
+
+  let result
+
+  if (scheduleId) {
+    const { data, error } = await supabase
+      .from('schedules')
+      .update({
+        subject_id: scheduleData.subject_id,
+        class_date: scheduleData.class_date,
+        room: scheduleData.room,
+        start_time: scheduleData.start_time,
+        description: scheduleData.description,
+      })
+      .eq('id', scheduleId)
+      .eq('teacher_id', user.id)
+      .select()
+      .single()
+
+    if (error) throw error
+    result = data
+  } else {
+    const { data, error } = await supabase
+      .from('schedules')
+      .insert(scheduleData)
+      .select()
+      .single()
+
+    if (error) throw error
+    result = data
+  }
+
+  const saved = normalizeSchedule(result)
+
+  setData((current) => ({
+    ...current,
+    schedules: scheduleId
+      ? current.schedules.map((item) =>
+          item.id === saved.id ? saved : item
+        )
+      : [...current.schedules, saved],
+  }))
+
+  setSelectedScheduleId(saved.id)
+
+  return saved
+}
 
   async function saveSchedule(event) {
     event.preventDefault()
@@ -349,53 +648,113 @@ function App() {
     }
   }
 
-  async function deleteSchedule(scheduleId) {
-    if (!window.confirm('Delete this schedule? Existing attendance records will be kept.')) return
-    try {
-      await apiRequest(`/schedules/${scheduleId}`, { method: 'DELETE' })
-      setData((current) => ({ ...current, schedules: current.schedules.filter((item) => item.id !== scheduleId) }))
-      if (selectedScheduleId === scheduleId) {
-        setSelectedScheduleId('')
-        setSchedule((current) => ({ ...current, room: '', time: '', description: '' }))
-      }
-    } catch (error) {
-      setDataError(error.message)
-    }
+  
+async function deleteSchedule(scheduleId) {
+  if (
+    !window.confirm(
+      'Delete this schedule? Existing attendance records will be kept.'
+    )
+  ) {
+    return
   }
 
-  async function saveAttendance(event) {
-    event.preventDefault()
-    if (!selectedSubject) return
-    setScheduleSaving(true)
-    setDataError('')
-    try {
-      const savedSchedule = await persistSchedule()
-      const records = subjectStudents.map((student) => ({
-        student_id: student.id,
-        status: attendanceStatuses[student.id],
-      }))
-      const savedRecords = await apiRequest('/attendance', {
-        method: 'PUT',
-        body: JSON.stringify({
-          subject_id: activeSubjectId,
-          attendance_date: schedule.date,
-          schedule_id: savedSchedule.id,
-          records,
-        }),
-      })
-      const savedStatuses = Object.fromEntries(savedRecords.map((record) => [record.student_id, record.status]))
-      setData((current) => ({
+  try {
+    const { error } = await supabase
+      .from('schedules')
+      .delete()
+      .eq('id', scheduleId)
+      .eq('teacher_id', user.id)
+
+    if (error) throw error
+
+    setData((current) => ({
+      ...current,
+      schedules: current.schedules.filter(
+        (item) => item.id !== scheduleId
+      ),
+    }))
+
+    if (selectedScheduleId === scheduleId) {
+      setSelectedScheduleId('')
+      setSchedule((current) => ({
         ...current,
-        attendance: { ...current.attendance, [attendanceKey]: { statuses: savedStatuses } },
+        room: '',
+        time: '',
+        description: '',
       }))
-      setSavedSession({ subjectName: selectedSubject.name, date: schedule.date, statuses: savedStatuses })
-      setPage('saved')
-    } catch (error) {
-      setDataError(error.message)
-    } finally {
-      setScheduleSaving(false)
     }
+  } catch (error) {
+    setDataError(error.message)
   }
+}
+
+
+  
+async function saveAttendance(event) {
+  event.preventDefault()
+  if (!selectedSubject) return
+
+  setScheduleSaving(true)
+  setDataError('')
+
+  try {
+    const savedSchedule = await persistSchedule()
+
+    const records = subjectStudents.map((student) => ({
+      teacher_id: user.id,
+      subject_id: activeSubjectId,
+      student_id: student.id,
+      schedule_id: savedSchedule.id,
+      attendance_date: schedule.date,
+      status: attendanceStatuses[student.id] || 'Present',
+    }))
+
+    const { error: deleteError } = await supabase
+      .from('attendance')
+      .delete()
+      .eq('teacher_id', user.id)
+      .eq('subject_id', activeSubjectId)
+      .eq('attendance_date', schedule.date)
+
+    if (deleteError) throw deleteError
+
+    if (records.length > 0) {
+      const { error: insertError } = await supabase
+        .from('attendance')
+        .insert(records)
+
+      if (insertError) throw insertError
+    }
+
+    const savedStatuses = Object.fromEntries(
+      records.map((record) => [
+        record.student_id,
+        record.status,
+      ])
+    )
+
+    setData((current) => ({
+      ...current,
+      attendance: {
+        ...current.attendance,
+        [attendanceKey]: { statuses: savedStatuses },
+      },
+    }))
+
+    setSavedSession({
+      subjectName: selectedSubject.name,
+      date: schedule.date,
+      statuses: savedStatuses,
+    })
+
+    setPage('saved')
+  } catch (error) {
+    setDataError(error.message)
+  } finally {
+    setScheduleSaving(false)
+  }
+}
+
 
   if (!user) {
     return (
